@@ -1,108 +1,101 @@
-# Cmd Bridge updater.
-# Downloads the latest tools/cmd-bridge files from GitHub (main branch)
-# and replaces the local copies. Old files are saved to a backup_ folder.
+﻿# Cmd Bridge updater (ASCII version)
+# Downloads files from the root of the repository and replaces local copies
+# next to this script. Old versions are kept in backup_<date>_<time>.
 #
-# The repository is PRIVATE, so one of these is required:
-#   * GITHUB_TOKEN environment variable (fine-grained PAT, Contents: Read)
-#   * GH_TOKEN environment variable
-#   * GitHub CLI installed and logged in (gh auth login)
+#   .\UpdateCmdBridge.ps1                          update from the default repo
+#   .\UpdateCmdBridge.ps1 -DryRun                  only list files
+#   .\UpdateCmdBridge.ps1 -Ref v1.1.0              update from a tag
+#   .\UpdateCmdBridge.ps1 -Subdir tools/cmd-bridge if files live in a subfolder
+#
+# Token lookup: GITHUB_TOKEN, then GH_TOKEN (optional for public repos).
 
 param(
-    [Parameter(Mandatory = $true)][string]$Target
+    [string]$Repo   = $env:CMD_BRIDGE_REPO,
+    [string]$Ref    = 'main',
+    [string]$Subdir = '',
+    [switch]$DryRun,
+    [switch]$Yes
 )
 
-$ErrorActionPreference = "Stop"
-$Target = $Target.TrimEnd("\", "/")
-$Owner = "i-dislike-lanschool"
-$Repo = "Free-Model-Radar"
-$Branch = "main"
-$SubPath = "tools/cmd-bridge"
-$Files = @("cmd_bridge.py", "README.md", "UpdateCmdBridge.ps1", "UpdateCmdBridge.cmd")
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
+if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = 'i-dislike-lanschool/cmd-br' }
+
+function Fail([string]$msg) {
+    Write-Host ''
+    Write-Host ('ERROR: ' + $msg) -ForegroundColor Red
+    Write-Host 'No file was changed.' -ForegroundColor Yellow
+    exit 1
+}
+
+$Subdir  = $Subdir.Trim('/')
+$selfDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$token = $env:GITHUB_TOKEN
+if ([string]::IsNullOrWhiteSpace($token)) { $token = $env:GH_TOKEN }
+$headers = @{ 'User-Agent' = 'cmd-bridge-updater'; 'Accept' = 'application/vnd.github+json' }
+if (-not [string]::IsNullOrWhiteSpace($token)) { $headers['Authorization'] = "Bearer $token" }
+
+$apiPath = "https://api.github.com/repos/$Repo/contents"
+if ($Subdir) { $apiPath = "$apiPath/$Subdir" }
+$apiPath = "$apiPath" + "?ref=$Ref"
+
+Write-Host ('repo  : ' + $Repo + '  (ref: ' + $Ref + ')')
+Write-Host ('token : ' + $(if ($token) { 'found' } else { 'not set (fine for public repos)' }))
+Write-Host ''
 
 try {
-    [Net.ServicePointManager]::SecurityProtocol = `
-        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-} catch { }
-
-function Get-GitHubToken {
-    if ($env:GITHUB_TOKEN) { return $env:GITHUB_TOKEN.Trim() }
-    if ($env:GH_TOKEN) { return $env:GH_TOKEN.Trim() }
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    if ($gh) {
-        try {
-            $t = & gh auth token 2>$null
-            if ($LASTEXITCODE -eq 0 -and $t) { return ($t | Out-String).Trim() }
-        } catch { }
-    }
-    return $null
+    $items = Invoke-RestMethod -Uri $apiPath -Headers $headers -Method Get
+} catch {
+    $code = $null
+    try { $code = $_.Exception.Response.StatusCode.value__ } catch { }
+    if ($code -eq 404) { Fail 'repository, branch or folder not found (404).' }
+    if ($code -eq 401 -or $code -eq 403) { Fail ('access denied (' + $code + ').') }
+    Fail ('could not read the file list: ' + $_.Exception.Message)
 }
 
-$token = Get-GitHubToken
-$headers = @{}
-if ($token) {
-    $headers["Authorization"] = "token $token"
-    Write-Host "Using a GitHub token for authentication."
-} else {
-    Write-Host "Note: no GitHub token found (GITHUB_TOKEN / GH_TOKEN / gh CLI)."
-    Write-Host "This works only if the repository is public."
+$files = @($items | Where-Object { $_.type -eq 'file' })
+if ($files.Count -eq 0) { Fail 'no files found.' }
+
+Write-Host ('files: ' + $files.Count)
+foreach ($f in $files) { Write-Host ('  ' + $f.name.PadRight(30) + $f.size.ToString().PadLeft(8) + ' B') }
+Write-Host ''
+
+if ($DryRun) { Write-Host 'DryRun: nothing downloaded, nothing changed.' -ForegroundColor Yellow; exit 0 }
+if (-not $Yes) {
+    $answer = Read-Host 'Download and replace local files? (y/n)'
+    if ($answer -notmatch '^[yY]') { Write-Host 'Cancelled.'; exit 0 }
 }
 
-$stamp = [DateTime]::Now.ToString("yyyyMMdd_HHmmss")
-$work = Join-Path $env:TEMP ("CmdBridgeUpdate_" + $stamp)
-New-Item -ItemType Directory -Path $work | Out-Null
+$backupDir = Join-Path $selfDir ('backup_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
 
-Write-Host "Downloading latest Cmd Bridge from $Owner/$Repo @ $Branch ..."
-$failed = @()
-foreach ($name in $Files) {
-    $url = "https://raw.githubusercontent.com/$Owner/$Repo/$Branch/$SubPath/$name"
-    $dest = Join-Path $work $name
+$updated = 0; $added = 0; $failed = @()
+foreach ($f in $files) {
+    $target = Join-Path $selfDir $f.name
+    $tmp = Join-Path $env:TEMP ('cb_' + [guid]::NewGuid().ToString('N') + '_' + $f.name)
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $dest `
-            -Headers $headers -TimeoutSec 60
-        if (-not (Test-Path $dest) -or (Get-Item $dest).Length -eq 0) {
-            throw "downloaded file is empty"
+        $dl = $headers.Clone()
+        $dl['Accept'] = 'application/octet-stream'
+        Invoke-WebRequest -Uri $f.download_url -Headers $dl -OutFile $tmp -UseBasicParsing
+        if (Test-Path $target) {
+            Copy-Item $target (Join-Path $backupDir $f.name) -Force
+            Move-Item $tmp $target -Force
+            $updated++
+            Write-Host ('  updated: ' + $f.name)
+        } else {
+            Move-Item $tmp $target -Force
+            $added++
+            Write-Host ('  added  : ' + $f.name)
         }
-        Write-Host "  ok: $name"
     } catch {
-        Write-Host ("  FAILED: {0} ({1})" -f $name, $_.Exception.Message)
-        $failed += $name
+        $failed += $f.name
+        Write-Host ('  ERROR: ' + $f.name + ' - ' + $_.Exception.Message) -ForegroundColor Red
+        if (Test-Path $tmp) { Remove-Item $tmp -Force }
     }
 }
 
-if ($failed.Count -gt 0) {
-    Write-Host ""
-    Write-Host "Update aborted, no files were changed."
-    Write-Host "The repository is private, so one of these is required:"
-    Write-Host "  1. set GITHUB_TOKEN=<personal access token with Contents: Read>"
-    Write-Host "     (GitHub -> Settings -> Developer settings -> Personal access tokens)"
-    Write-Host "  2. or install GitHub CLI and run: gh auth login"
-    exit 1
-}
-
-# Sanity check before touching local files.
-$py = Get-Content (Join-Path $work "cmd_bridge.py") -Raw
-if ($py -notmatch "Cmd Bridge") {
-    Write-Host "Update aborted: downloaded cmd_bridge.py looks wrong."
-    exit 1
-}
-
-# Backup current files.
-$backup = Join-Path $Target ("backup_" + $stamp)
-New-Item -ItemType Directory -Path $backup | Out-Null
-foreach ($name in $Files) {
-    $current = Join-Path $Target $name
-    if (Test-Path $current) {
-        Copy-Item $current $backup -Force
-    }
-}
-
-foreach ($name in $Files) {
-    Copy-Item (Join-Path $work $name) (Join-Path $Target $name) -Force
-    Write-Host "Updated: $name"
-}
-
-Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host ""
-Write-Host "Cmd Bridge is up to date. Previous files saved to:"
-Write-Host $backup
-exit 0
+Write-Host ''
+Write-Host ('Done. Updated: ' + $updated + ', added: ' + $added + ', errors: ' + $failed.Count)
+Write-Host ('Backup: ' + $backupDir)
+Write-Host 'Restart CmdBridge.cmd to run the new version.'
