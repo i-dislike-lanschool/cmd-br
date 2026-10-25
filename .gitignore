@@ -1,0 +1,11 @@
+cmd_bridge_history.log
+backup_*/
+__pycache__/
+*.pyc
+.env
+copy-and-prepare.ps1
+extract-to-new-repo.ps1
+*.bak
+Thumbs.db
+desktop.ini
+
