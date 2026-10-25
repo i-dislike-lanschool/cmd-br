@@ -174,7 +174,7 @@ def wrap_output(output: str, exit_code: int) -> str:
     return (
         f"-----FMR-BRIDGE-OUT v1 exit:{exit_code} sha1:{sha}-----\n"
         f"{body}\n"
-        f"-----END FMR-BRIDGE-OUT-----"
+        f"-----END FMR-BRIDGE-OUT-----\n\n\n"
     )
 
 
@@ -186,7 +186,7 @@ AI_INSTRUCTIONS_TEXT = """\
 Инструкция для ИИ/агента: командный мост FMR-BRIDGE (Free Model Radar)
 
 Что это. У пользователя на Windows запущен «мост» — консольная утилита
-cmd_bridge.py из репозитория i-dislike-lanschool/Free-Model-Radar
+cmd_bridge.py из репозитория i-dislike-lanschool/cmd-br
 (папка tools/cmd-bridge). Пользователь копирует твои команды из чата,
 мост подхватывает их из буфера обмена и выполняет на его машине ТОЛЬКО
 после его ручного подтверждения. Ты не имеешь прямого доступа к машине —
@@ -728,8 +728,12 @@ def confirm_and_run(plan: CommandPlan, clipboard, cwd: str | None) -> bool:
     print("Выполняю...")
     print("=" * 72)
     code, output = run_plan(plan, cwd)
+    print()
+    print()
     print("=" * 72)
     print(f"Готово, код выхода: {code}")
+    print()
+    print()
     signed_output = wrap_output(output or "", code)
     if clipboard is not None and clipboard.write(signed_output):
         print("Вывод автоматически скопирован в буфер обмена")
